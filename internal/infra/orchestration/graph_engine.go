@@ -13,13 +13,34 @@ type GraphEngine struct {
 	worker     port.Worker
 	evaluator  port.Evaluator
 	policy     port.Policy
+	mode       ExecutionMode
 }
 
-func NewGraphEngine(supervisor port.Supervisor, worker port.Worker, evaluator port.Evaluator, policy port.Policy) (*GraphEngine, error) {
+type ExecutionMode struct {
+	EnableParallelWorkers bool
+	EnableBranchGraph     bool
+	EnableRollbackRetry   bool
+}
+
+type GraphEngineOption func(*GraphEngine)
+
+func WithExecutionMode(mode ExecutionMode) GraphEngineOption {
+	return func(e *GraphEngine) {
+		e.mode = mode
+	}
+}
+
+func NewGraphEngine(supervisor port.Supervisor, worker port.Worker, evaluator port.Evaluator, policy port.Policy, opts ...GraphEngineOption) (*GraphEngine, error) {
 	if supervisor == nil || worker == nil || evaluator == nil || policy == nil {
 		return nil, errors.New("nil graph engine dependency")
 	}
-	return &GraphEngine{supervisor: supervisor, worker: worker, evaluator: evaluator, policy: policy}, nil
+	engine := &GraphEngine{supervisor: supervisor, worker: worker, evaluator: evaluator, policy: policy}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(engine)
+		}
+	}
+	return engine, nil
 }
 
 func (e *GraphEngine) Execute(ctx context.Context, in domain.GraphInput) (domain.GraphResult, error) {
@@ -40,6 +61,9 @@ func (e *GraphEngine) Execute(ctx context.Context, in domain.GraphInput) (domain
 
 	trace := make([]domain.StepTrace, 0, state.MaxSteps)
 	for !domain.ShouldStop(state) {
+		// TODO(graph-exec-v2): add true branch graph scheduling once node DAG is introduced.
+		// TODO(graph-exec-v2): add parallel worker execution when policy permits concurrent branches.
+		// TODO(graph-exec-v2): add rollback/retry transaction model for compensating side effects.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return domain.GraphResult{
 				Status:    mapContextStatus(ctxErr),

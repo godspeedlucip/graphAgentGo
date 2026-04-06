@@ -41,9 +41,13 @@ type GraphState struct {
 }
 
 type SupervisorDecision struct {
-	Action    string
-	ToolName  string
-	ToolInput string
+	Action       string
+	ToolName     string
+	ToolInput    string
+	DecisionType string
+	Reason       string
+	Confidence   float64
+	Metadata     map[string]any
 }
 
 type WorkerOutput struct {
@@ -52,9 +56,13 @@ type WorkerOutput struct {
 }
 
 type Evaluation struct {
-	Pass      bool
-	Score     float64
-	Feedback  string
+	Pass            bool
+	Score           float64
+	Feedback        string
+	Decision        string
+	PolicyViolation bool
+	Retryable       bool
+	Metadata        map[string]any
 }
 
 type PolicyVerdict struct {
