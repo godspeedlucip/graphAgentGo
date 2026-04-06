@@ -75,8 +75,8 @@ func (r *PGVectorRepository) KeywordSearchAllKB(ctx context.Context, keywords []
 	if limit <= 0 {
 		return nil, domain.ErrInvalidInput
 	}
-	// TODO: align ranking formula with Java mapper's CASE-sum weighting if keyword search becomes primary path.
-	if len(keywords) == 0 {
+	q, args, empty := buildKeywordSearchAllKBQuery(keywords, limit)
+	if empty {
 		const q = `
 SELECT
     id::text,
@@ -96,24 +96,65 @@ LIMIT $1
 		defer rows.Close()
 		return scanChunks(rows)
 	}
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChunks(rows)
+}
 
-	parts := make([]string, 0, len(keywords))
-	args := make([]any, 0, len(keywords)+1)
+func (r *PGVectorRepository) EnsurePerformanceIndexes(ctx context.Context) error {
+	stmts := []string{
+		// pgvector ANN index for similarity ORDER BY embedding <-> query
+		`CREATE INDEX IF NOT EXISTS idx_chunk_bge_m3_embedding_ivfflat
+ON chunk_bge_m3 USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`,
+		// supports kb scoped freshness fallback/order
+		`CREATE INDEX IF NOT EXISTS idx_chunk_bge_m3_kb_updated_at
+ON chunk_bge_m3 (kb_id, updated_at DESC)`,
+		// supports global keyword empty-query ordering
+		`CREATE INDEX IF NOT EXISTS idx_chunk_bge_m3_updated_at
+ON chunk_bge_m3 (updated_at DESC)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildKeywordSearchAllKBQuery(keywords []string, limit int) (query string, args []any, empty bool) {
+	if len(keywords) == 0 {
+		return "", nil, true
+	}
+
+	whereParts := make([]string, 0, len(keywords))
+	scoreParts := make([]string, 0, len(keywords))
+	args = make([]any, 0, len(keywords)+1)
 	argIdx := 1
+
 	for _, kw := range keywords {
-		if strings.TrimSpace(kw) == "" {
+		trimmed := strings.TrimSpace(kw)
+		if trimmed == "" {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("lower(content) LIKE lower($%d)", argIdx))
-		args = append(args, "%"+kw+"%")
+		placeholder := fmt.Sprintf("$%d", argIdx)
+		pattern := "%" + trimmed + "%"
+		whereParts = append(whereParts, fmt.Sprintf("lower(content) LIKE lower(%s)", placeholder))
+		// Align Java XML mapper:
+		// CASE WHEN lower(content) LIKE ... THEN 1 ELSE 0 END (sum across keywords)
+		scoreParts = append(scoreParts, fmt.Sprintf("CASE WHEN lower(content) LIKE lower(%s) THEN 1 ELSE 0 END", placeholder))
+		args = append(args, pattern)
 		argIdx++
 	}
-	if len(parts) == 0 {
-		return []domain.Chunk{}, nil
+
+	if len(whereParts) == 0 {
+		return "", nil, true
 	}
 	args = append(args, limit)
 
-	q := fmt.Sprintf(`
+	query = fmt.Sprintf(`
 SELECT
     id::text,
     kb_id::text,
@@ -123,16 +164,10 @@ SELECT
     embedding::text
 FROM chunk_bge_m3
 WHERE (%s)
-ORDER BY updated_at DESC
+ORDER BY (%s) DESC, updated_at DESC
 LIMIT $%d
-`, strings.Join(parts, " OR "), argIdx)
-
-	rows, err := r.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanChunks(rows)
+`, strings.Join(whereParts, " OR "), strings.Join(scoreParts, " + "), argIdx)
+	return query, args, false
 }
 
 func scanChunks(rows *sql.Rows) ([]domain.Chunk, error) {

@@ -32,6 +32,9 @@ func (h *Handler) SimilaritySearchByKB(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Transport integration point:
+	// if project-wide ApiResponse middleware is introduced, this payload can be wrapped there
+	// without changing vector service/repository contracts.
 	_ = json.NewEncoder(w).Encode(map[string]any{"results": result})
 }
 

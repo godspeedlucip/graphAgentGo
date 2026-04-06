@@ -28,7 +28,8 @@ type service struct {
 	sseNotifier  sse.MessageNotifier
 	llmClient    llm.Client
 
-	cfg Config
+	cfg      Config
+	observer Observer
 }
 
 func NewService(
@@ -39,6 +40,7 @@ func NewService(
 	sseNotifier sse.MessageNotifier,
 	llmClient llm.Client,
 	cfg Config,
+	opts ...Option,
 ) (Service, error) {
 	if embeddingProvider == nil || chunkRepository == nil || messageStore == nil || eventBus == nil || sseNotifier == nil || llmClient == nil {
 		return nil, errors.New("nil dependency in vector service")
@@ -55,7 +57,7 @@ func NewService(
 	if cfg.LimitAllKB <= 0 {
 		cfg.LimitAllKB = 5
 	}
-	return &service{
+	svc := &service{
 		embeddingProvider: embeddingProvider,
 		chunkRepository:   chunkRepository,
 		messageStore:      messageStore,
@@ -63,7 +65,17 @@ func NewService(
 		sseNotifier:       sseNotifier,
 		llmClient:         llmClient,
 		cfg:               cfg,
-	}, nil
+		observer:          NewNoopObserver(),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	if svc.observer == nil {
+		svc.observer = NewNoopObserver()
+	}
+	return svc, nil
 }
 
 func (s *service) SimilaritySearch(ctx context.Context, kbID string, query string, limit int) ([]string, error) {
@@ -78,6 +90,12 @@ func (s *service) SimilaritySearch(ctx context.Context, kbID string, query strin
 	if err != nil {
 		// Keep Java behavior: fail-open by returning empty results for retrieval failures.
 		slog.Warn("vector embed failed", "kbID", kbID, "err", err)
+		s.observer.RecordFallback("similarity_by_kb", "embed_failed")
+		return []string{}, nil
+	}
+	if len(vector) == 0 {
+		slog.Warn("vector embed empty", "kbID", kbID)
+		s.observer.RecordFallback("similarity_by_kb", "embed_empty")
 		return []string{}, nil
 	}
 
@@ -85,6 +103,7 @@ func (s *service) SimilaritySearch(ctx context.Context, kbID string, query strin
 	chunks, err := s.chunkRepository.SimilaritySearchByKB(ctx, kbID, vectorLiteral, limit)
 	if err != nil {
 		slog.Warn("vector similarity search by kb failed", "kbID", kbID, "err", err)
+		s.observer.RecordFallback("similarity_by_kb", "repo_failed")
 		return []string{}, nil
 	}
 
@@ -103,6 +122,12 @@ func (s *service) SimilaritySearchAllKnowledgeBases(ctx context.Context, query s
 	vector, err := s.embeddingProvider.Embed(ctx, query)
 	if err != nil {
 		slog.Warn("vector embed failed", "err", err)
+		s.observer.RecordFallback("similarity_all_kb", "embed_failed")
+		return []string{}, nil
+	}
+	if len(vector) == 0 {
+		slog.Warn("vector embed empty")
+		s.observer.RecordFallback("similarity_all_kb", "embed_empty")
 		return []string{}, nil
 	}
 
@@ -110,6 +135,7 @@ func (s *service) SimilaritySearchAllKnowledgeBases(ctx context.Context, query s
 	chunks, err := s.chunkRepository.SimilaritySearchAllKB(ctx, vectorLiteral, limit)
 	if err != nil {
 		slog.Warn("vector similarity search all kb failed", "err", err)
+		s.observer.RecordFallback("similarity_all_kb", "repo_failed")
 		return []string{}, nil
 	}
 
@@ -136,6 +162,16 @@ func (s *service) filterByConfidence(chunks []domain.Chunk, queryVector []float3
 	out := make([]domain.Chunk, 0, len(chunks))
 	for _, chunk := range chunks {
 		if chunk.Content == "" || len(chunk.Embedding) == 0 {
+			continue
+		}
+		if len(chunk.Embedding) != len(queryVector) {
+			slog.Warn("vector dimension mismatch",
+				"chunkID", chunk.ID,
+				"kbID", chunk.KBID,
+				"query_dim", len(queryVector),
+				"chunk_dim", len(chunk.Embedding),
+			)
+			s.observer.RecordDimensionMismatch(len(queryVector), len(chunk.Embedding))
 			continue
 		}
 		score := domain.CosineSimilarity(queryVector, chunk.Embedding)
