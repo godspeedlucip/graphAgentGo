@@ -25,6 +25,7 @@ type publisherService struct {
 	eventBus     queue.EventPublisher
 	sseNotifier  sse.MessageNotifier
 	llmClient    llm.Client
+	observer     port.Observer
 }
 
 func NewPublisherService(
@@ -33,17 +34,25 @@ func NewPublisherService(
 	eventBus queue.EventPublisher,
 	sseNotifier sse.MessageNotifier,
 	llmClient llm.Client,
+	opts ...PublisherOption,
 ) (PublisherService, error) {
 	if publisher == nil || messageStore == nil || eventBus == nil || sseNotifier == nil || llmClient == nil {
 		return nil, errors.New("nil dependency in event publisher service")
 	}
-	return &publisherService{
+	svc := &publisherService{
 		publisher:    publisher,
 		messageStore: messageStore,
 		eventBus:     eventBus,
 		sseNotifier:  sseNotifier,
 		llmClient:    llmClient,
-	}, nil
+		observer:     noopObserver{},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	return svc, nil
 }
 
 func (s *publisherService) PublishChatEvent(ctx context.Context, cmd PublishChatEventCommand) error {
@@ -52,9 +61,11 @@ func (s *publisherService) PublishChatEvent(ctx context.Context, cmd PublishChat
 	}
 	if err := s.publisher.PublishChatEvent(ctx, cmd.Event); err != nil {
 		// Keep Java-like behavior: event dispatch failures should not block request main path.
+		s.observer.RecordFailed("chat_event", "publish")
 		slog.Warn("publish chat event skipped", "eventID", cmd.Event.EventID, "agentID", cmd.Event.AgentID, "sessionID", cmd.Event.SessionID, "err", err)
 		return nil
 	}
+	s.observer.RecordPublished("chat_event")
 	return nil
 }
 
