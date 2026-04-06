@@ -24,10 +24,16 @@ type Rule struct {
 	Method       string
 	Target       Target
 	TrafficRatio int // 0-100, reserved for gradual rollout
+	UserIDs      []string
+	TenantIDs    []string
+	AgentIDs     []string
 	Enabled      bool
 }
 
 type Rules struct {
-	DefaultTarget Target
-	Items         []Rule
+	DefaultTarget              Target
+	WriteFallbackPathPrefixes  []string
+	WriteFallbackMethods       []string
+	IdempotencyHeader          string
+	Items                      []Rule
 }

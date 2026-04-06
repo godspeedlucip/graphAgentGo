@@ -34,6 +34,9 @@ func (e *RuleDecisionEngine) Decide(_ context.Context, req domain.Request, rules
 		if rule.Target != domain.TargetJava && rule.Target != domain.TargetGo {
 			continue
 		}
+		if !hitAudience(rule, req) {
+			continue
+		}
 		if !hitTrafficRatio(rule, req) {
 			continue
 		}
@@ -69,4 +72,38 @@ func hitTrafficRatio(rule domain.Rule, req domain.Request) bool {
 	_, _ = h.Write([]byte(seed))
 	bucket := int(h.Sum32() % 100)
 	return bucket < rule.TrafficRatio
+}
+
+func hitAudience(rule domain.Rule, req domain.Request) bool {
+	if len(rule.UserIDs) > 0 && !containsFold(rule.UserIDs, headerValue(req.Header, "x-user-id")) {
+		return false
+	}
+	if len(rule.TenantIDs) > 0 && !containsFold(rule.TenantIDs, headerValue(req.Header, "x-tenant-id")) {
+		return false
+	}
+	if len(rule.AgentIDs) > 0 && !containsFold(rule.AgentIDs, headerValue(req.Header, "x-agent-id")) {
+		return false
+	}
+	return true
+}
+
+func containsFold(items []string, target string) bool {
+	if strings.TrimSpace(target) == "" {
+		return false
+	}
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func headerValue(h map[string]string, key string) string {
+	for k, v := range h {
+		if strings.EqualFold(k, key) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
