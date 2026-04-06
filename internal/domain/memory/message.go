@@ -16,8 +16,21 @@ type Message struct {
 }
 
 type Metadata struct {
-	ToolResponse any   `json:"toolResponse,omitempty"`
-	ToolCalls    []any `json:"toolCalls,omitempty"`
+	ToolResponse *ToolResponse `json:"toolResponse,omitempty"`
+	ToolCalls    []ToolCall    `json:"toolCalls,omitempty"`
+}
+
+type ToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+type ToolResponse struct {
+	ID           string `json:"id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	ResponseData string `json:"responseData,omitempty"`
 }
 
 type CachedMessage struct {
