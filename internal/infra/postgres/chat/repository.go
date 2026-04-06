@@ -227,6 +227,35 @@ WHERE id = CAST($6 AS uuid)
 	return nil
 }
 
+func (r *Repository) AppendContent(ctx context.Context, id string, delta string) error {
+	if id == "" || delta == "" {
+		return domain.ErrInvalidInput
+	}
+
+	// Atomic append in SQL to avoid read-modify-write lost update under concurrent stream deltas.
+	// Adapter point: this query can be moved to sqlc/pgx generated layer without changing service contracts.
+	const q = `
+UPDATE chat_message
+SET
+    content = COALESCE(content, '') || $1,
+    updated_at = $2
+WHERE id = CAST($3 AS uuid)
+`
+
+	result, err := r.db.ExecContext(ctx, q, delta, time.Now(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
 func (r *Repository) Delete(ctx context.Context, id string) error {
 	if id == "" {
 		return domain.ErrInvalidInput

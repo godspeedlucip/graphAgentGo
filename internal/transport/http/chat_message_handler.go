@@ -38,7 +38,7 @@ type updateChatMessageRequest struct {
 func (h *ChatMessageHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createChatMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, err)
 		return
 	}
 
@@ -50,26 +50,26 @@ func (h *ChatMessageHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Metadata:  req.Metadata,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 
-	_ = json.NewEncoder(w).Encode(map[string]any{"chatMessageId": id})
+	writeSuccess(w, http.StatusOK, map[string]any{"chatMessageId": id})
 }
 
 func (h *ChatMessageHandler) ListBySession(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimPrefix(r.URL.Path, "/api/chat-messages/session/")
 	if sessionID == "" {
-		http.Error(w, "missing sessionId", http.StatusBadRequest)
+		writeError(w, domain.ErrInvalidInput)
 		return
 	}
 
 	messages, err := h.service.ListBySession(r.Context(), sessionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"chatMessages": messages})
+	writeSuccess(w, http.StatusOK, map[string]any{"chatMessages": messages})
 }
 
 func (h *ChatMessageHandler) ListRecentBySession(w http.ResponseWriter, r *http.Request) {
@@ -82,16 +82,16 @@ func (h *ChatMessageHandler) ListRecentBySession(w http.ResponseWriter, r *http.
 
 	messages, err := h.service.ListRecentBySession(r.Context(), sessionID, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"chatMessages": messages})
+	writeSuccess(w, http.StatusOK, map[string]any{"chatMessages": messages})
 }
 
 func (h *ChatMessageHandler) Append(w http.ResponseWriter, r *http.Request) {
-	messageID := strings.TrimPrefix(r.URL.Path, "/api/chat-messages/")
+	messageID := parseChatMessageID(r.URL.Path)
 	if messageID == "" {
-		http.Error(w, "missing chatMessageId", http.StatusBadRequest)
+		writeError(w, domain.ErrInvalidInput)
 		return
 	}
 
@@ -99,27 +99,27 @@ func (h *ChatMessageHandler) Append(w http.ResponseWriter, r *http.Request) {
 		AppendContent string `json:"appendContent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, err)
 		return
 	}
 
 	if err := h.service.Append(r.Context(), messageID, body.AppendContent); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeSuccess(w, http.StatusOK, map[string]any{"chatMessageId": messageID})
 }
 
 func (h *ChatMessageHandler) Update(w http.ResponseWriter, r *http.Request) {
-	messageID := strings.TrimPrefix(r.URL.Path, "/api/chat-messages/")
+	messageID := parseChatMessageID(r.URL.Path)
 	if messageID == "" {
-		http.Error(w, "missing chatMessageId", http.StatusBadRequest)
+		writeError(w, domain.ErrInvalidInput)
 		return
 	}
 
 	var req updateChatMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, err)
 		return
 	}
 
@@ -127,22 +127,38 @@ func (h *ChatMessageHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Content:  req.Content,
 		Metadata: req.Metadata,
 	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeSuccess[any](w, http.StatusOK, nil)
 }
 
 func (h *ChatMessageHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	messageID := strings.TrimPrefix(r.URL.Path, "/api/chat-messages/")
+	messageID := parseChatMessageID(r.URL.Path)
 	if messageID == "" {
-		http.Error(w, "missing chatMessageId", http.StatusBadRequest)
+		writeError(w, domain.ErrInvalidInput)
 		return
 	}
 
 	if err := h.service.Delete(r.Context(), messageID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeSuccess[any](w, http.StatusOK, nil)
+}
+
+func parseChatMessageID(path string) string {
+	trimmed := strings.TrimPrefix(path, "/api/chat-messages/")
+	trimmed = strings.Trim(trimmed, "/")
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasSuffix(trimmed, "/append") {
+		trimmed = strings.TrimSuffix(trimmed, "/append")
+		trimmed = strings.Trim(trimmed, "/")
+	}
+	if idx := strings.Index(trimmed, "/"); idx >= 0 {
+		return strings.Trim(trimmed[:idx], "/")
+	}
+	return trimmed
 }

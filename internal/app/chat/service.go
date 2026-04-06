@@ -53,7 +53,7 @@ func NewService(
 
 func (s *service) CreateFromCommand(ctx context.Context, cmd CreateMessageCommand) (string, error) {
 	if cmd.SessionID == "" || cmd.Role == "" {
-		return "", domain.ErrInvalidInput
+		return "", newInvalidInputError("sessionId and role are required")
 	}
 	msg := &domain.Message{
 		SessionID: cmd.SessionID,
@@ -64,7 +64,7 @@ func (s *service) CreateFromCommand(ctx context.Context, cmd CreateMessageComman
 
 	id, err := s.store.Create(ctx, msg)
 	if err != nil {
-		return "", err
+		return "", wrapAppError(err)
 	}
 
 	if cmd.Role == domain.RoleUser {
@@ -84,57 +84,74 @@ func (s *service) CreateFromCommand(ctx context.Context, cmd CreateMessageComman
 
 func (s *service) CreateInternal(ctx context.Context, msg *domain.Message) (string, error) {
 	if msg == nil {
-		return "", domain.ErrInvalidInput
+		return "", newInvalidInputError("message is nil")
 	}
-	return s.store.Create(ctx, msg)
+	id, err := s.store.Create(ctx, msg)
+	if err != nil {
+		return "", wrapAppError(err)
+	}
+	return id, nil
 }
 
 func (s *service) Append(ctx context.Context, messageID string, appendContent string) error {
 	if messageID == "" || appendContent == "" {
-		return domain.ErrInvalidInput
+		return newInvalidInputError("chatMessageId and appendContent are required")
+	}
+
+	if appender, ok := s.store.(repository.ChatMessageAppender); ok {
+		// Prefer SQL-level atomic append to avoid lost updates under concurrent DELTA writes.
+		return wrapAppError(appender.AppendContent(ctx, messageID, appendContent))
 	}
 
 	existing, err := s.store.GetByID(ctx, messageID)
 	if err != nil {
-		return err
+		return wrapAppError(err)
 	}
 	if existing == nil {
-		return domain.ErrNotFound
+		return wrapAppError(domain.ErrNotFound)
 	}
 
 	if err = existing.Append(appendContent); err != nil {
-		return err
+		return wrapAppError(err)
 	}
 
-	// TODO: consider optimistic locking/version column or SQL atomic concat for concurrent append safety.
-	return s.store.Update(ctx, existing)
+	// TODO: remove fallback once all repositories implement ChatMessageAppender for atomic append.
+	return wrapAppError(s.store.Update(ctx, existing))
 }
 
 func (s *service) ListBySession(ctx context.Context, sessionID string) ([]*domain.Message, error) {
 	if sessionID == "" {
-		return nil, domain.ErrInvalidInput
+		return nil, newInvalidInputError("sessionId is required")
 	}
-	return s.store.ListBySession(ctx, sessionID)
+	out, err := s.store.ListBySession(ctx, sessionID)
+	if err != nil {
+		return nil, wrapAppError(err)
+	}
+	return out, nil
 }
 
 func (s *service) ListRecentBySession(ctx context.Context, sessionID string, limit int) ([]*domain.Message, error) {
 	if sessionID == "" || limit <= 0 {
-		return nil, domain.ErrInvalidInput
+		return nil, newInvalidInputError("sessionId is required and limit must be > 0")
 	}
-	return s.store.ListRecentBySession(ctx, sessionID, limit)
+	out, err := s.store.ListRecentBySession(ctx, sessionID, limit)
+	if err != nil {
+		return nil, wrapAppError(err)
+	}
+	return out, nil
 }
 
 func (s *service) Update(ctx context.Context, messageID string, cmd UpdateMessageCommand) error {
 	if messageID == "" {
-		return domain.ErrInvalidInput
+		return newInvalidInputError("chatMessageId is required")
 	}
 
 	existing, err := s.store.GetByID(ctx, messageID)
 	if err != nil {
-		return err
+		return wrapAppError(err)
 	}
 	if existing == nil {
-		return domain.ErrNotFound
+		return wrapAppError(domain.ErrNotFound)
 	}
 
 	if cmd.Content != nil {
@@ -144,21 +161,21 @@ func (s *service) Update(ctx context.Context, messageID string, cmd UpdateMessag
 		existing.Metadata = cmd.Metadata
 	}
 
-	return s.store.Update(ctx, existing)
+	return wrapAppError(s.store.Update(ctx, existing))
 }
 
 func (s *service) Delete(ctx context.Context, messageID string) error {
 	if messageID == "" {
-		return domain.ErrInvalidInput
+		return newInvalidInputError("chatMessageId is required")
 	}
 
 	existing, err := s.store.GetByID(ctx, messageID)
 	if err != nil {
-		return err
+		return wrapAppError(err)
 	}
 	if existing == nil {
-		return fmt.Errorf("%w: %s", domain.ErrNotFound, messageID)
+		return wrapAppError(fmt.Errorf("%w: %s", domain.ErrNotFound, messageID))
 	}
 
-	return s.store.Delete(ctx, messageID)
+	return wrapAppError(s.store.Delete(ctx, messageID))
 }

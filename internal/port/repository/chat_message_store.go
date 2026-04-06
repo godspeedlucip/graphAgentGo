@@ -14,3 +14,9 @@ type ChatMessageStore interface {
 	Update(ctx context.Context, msg *domain.Message) error
 	Delete(ctx context.Context, id string) error
 }
+
+// ChatMessageAppender is an optional capability for repositories that support atomic SQL append.
+// Service.Append will use this interface when available to avoid lost updates under concurrent writes.
+type ChatMessageAppender interface {
+	AppendContent(ctx context.Context, id string, delta string) error
+}
