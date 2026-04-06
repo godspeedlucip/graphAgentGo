@@ -17,6 +17,8 @@ type RuntimeInput struct {
 	SessionID string
 	UserInput string
 	Metadata  map[string]any
+	// AppendOutput enables incremental output persistence/streaming.
+	AppendOutput func(ctx context.Context, delta string) error
 }
 
 type RuntimeOutput struct {

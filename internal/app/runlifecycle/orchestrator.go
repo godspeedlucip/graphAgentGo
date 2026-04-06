@@ -10,6 +10,7 @@ import (
 
 type Orchestrator interface {
 	Transit(ctx context.Context, runID string, from domain.Status, to domain.Status, metadata map[string]any) error
+	EmitDelta(ctx context.Context, runID string, sessionID string, delta string, metadata map[string]any)
 }
 
 type orchestrator struct {
@@ -74,6 +75,33 @@ func (o *orchestrator) Transit(ctx context.Context, runID string, from domain.St
 	}
 
 	return nil
+}
+
+func (o *orchestrator) EmitDelta(ctx context.Context, runID string, sessionID string, delta string, metadata map[string]any) {
+	if runID == "" || delta == "" {
+		return
+	}
+	evtMeta := map[string]any{
+		"runId":     runID,
+		"sessionId": sessionID,
+		"delta":     delta,
+		"stage":     "delta",
+	}
+	for k, v := range metadata {
+		evtMeta[k] = v
+	}
+	if err := o.publisher.PublishLifecycle(ctx, domain.LifecycleEvent{
+		RunID:      runID,
+		SessionID:  sessionID,
+		Status:     domain.StatusRunning,
+		OccurredAt: o.clock.Now(),
+		Metadata:   evtMeta,
+	}); err != nil {
+		slog.Warn("publish lifecycle delta skipped", "runID", runID, "sessionID", sessionID, "err", err)
+	}
+	if err := o.notifier.NotifyDelta(ctx, runID, sessionID, delta); err != nil {
+		slog.Warn("notify run delta skipped", "runID", runID, "sessionID", sessionID, "err", err)
+	}
 }
 
 func metadataString(metadata map[string]any, key string) (string, bool) {

@@ -24,6 +24,9 @@ func NewNoopSSENotifier() *NoopSSENotifier {
 }
 
 func (n *NoopSSENotifier) NotifyStarted(_ context.Context, _ string, _ string) error { return nil }
+func (n *NoopSSENotifier) NotifyDelta(_ context.Context, _ string, _ string, _ string) error {
+	return nil
+}
 func (n *NoopSSENotifier) NotifyDone(_ context.Context, _ string, _ string) error    { return nil }
 func (n *NoopSSENotifier) NotifyFailed(_ context.Context, _ string, _ string, _ string) error {
 	return nil

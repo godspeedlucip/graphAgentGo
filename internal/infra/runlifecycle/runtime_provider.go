@@ -1,10 +1,12 @@
 ﻿package runlifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
 
 	factoryapp "go-sse-skeleton/internal/app/agentruntime"
+	agport "go-sse-skeleton/internal/port/agentruntime"
 	port "go-sse-skeleton/internal/port/runlifecycle"
 )
 
@@ -38,10 +40,21 @@ type portRuntime interface {
 }
 
 func (r runtimeAdapter) Run(ctx context.Context, in port.RuntimeInput) (port.RuntimeOutput, error) {
-	_ = in
-	// TODO: map RuntimeInput.UserInput/Metadata into graph execution context once runtime supports explicit input payload.
-	if err := r.base.Run(ctx); err != nil {
+	runCtx := ctx
+	var out bytes.Buffer
+	if in.AppendOutput != nil {
+		runCtx = agport.WithExecutionHooks(ctx, agport.ExecutionHooks{
+			AppendDelta: func(deltaCtx context.Context, delta string) error {
+				return in.AppendOutput(deltaCtx, delta)
+			},
+			CollectDelta: func(delta string) {
+				_, _ = out.WriteString(delta)
+			},
+		})
+	}
+	// TODO: map RuntimeInput.UserInput/Metadata into richer runtime execution context fields.
+	if err := r.base.Run(runCtx); err != nil {
 		return port.RuntimeOutput{}, err
 	}
-	return port.RuntimeOutput{}, nil
+	return port.RuntimeOutput{Text: out.String()}, nil
 }

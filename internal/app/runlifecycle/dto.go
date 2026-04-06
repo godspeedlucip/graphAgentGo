@@ -1,6 +1,8 @@
 ﻿package runlifecycle
 
 import (
+	"time"
+
 	domain "go-sse-skeleton/internal/domain/runlifecycle"
 	port "go-sse-skeleton/internal/port/runlifecycle"
 )
@@ -11,6 +13,7 @@ type StartRunCommand struct {
 	SessionID string
 	UserInput string
 	Metadata  map[string]any
+	Timeout   time.Duration
 }
 
 type CancelRunCommand struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	domain "go-sse-skeleton/internal/domain/runlifecycle"
@@ -26,6 +27,8 @@ type service struct {
 	guard           port.IdempotencyGuard
 	orchestrator    Orchestrator
 	clock           port.Clock
+	registry        RuntimeRegistry
+	retryPolicy     RetryPolicy
 
 	// Shared dependencies injected for consistency with project-wide constructor style.
 	messageStore repo.ChatMessageStore
@@ -44,21 +47,36 @@ func NewService(
 	eventBus queue.EventPublisher,
 	sseNotifier sse.MessageNotifier,
 	llmClient llm.Client,
+	opts ...Option,
 ) (Service, error) {
 	if runtimeProvider == nil || runRepo == nil || guard == nil || orchestrator == nil || clock == nil || messageStore == nil || eventBus == nil || sseNotifier == nil || llmClient == nil {
 		return nil, errors.New("nil dependency in run lifecycle service")
 	}
-	return &service{
+	svc := &service{
 		runtimeProvider: runtimeProvider,
 		runRepo:         runRepo,
 		guard:           guard,
 		orchestrator:    orchestrator,
 		clock:           clock,
+		registry:        NewRuntimeRegistry(),
+		retryPolicy:     defaultRetryPolicy(),
 		messageStore:    messageStore,
 		eventBus:        eventBus,
 		sseNotifier:     sseNotifier,
 		llmClient:       llmClient,
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	if svc.registry == nil {
+		svc.registry = NewRuntimeRegistry()
+	}
+	if svc.retryPolicy.MaxAttempts <= 0 {
+		svc.retryPolicy = defaultRetryPolicy()
+	}
+	return svc, nil
 }
 
 func (s *service) Start(ctx context.Context, cmd StartRunCommand) (RunResult, error) {
@@ -96,29 +114,77 @@ func (s *service) Start(ctx context.Context, cmd StartRunCommand) (RunResult, er
 		return RunResult{}, err
 	}
 
-	runtime, err := s.runtimeProvider.GetRuntime(ctx, cmd.AgentID, cmd.SessionID)
-	if err != nil {
-		failMeta := mergeMeta(meta, map[string]any{
-			"error": err.Error(),
-		})
-		_ = s.orchestrator.Transit(ctx, cmd.RunID, domain.StatusInit, domain.StatusFailed, failMeta)
-		return RunResult{RunID: cmd.RunID, Status: domain.StatusFailed, ErrorCode: "RUNTIME_BUILD_FAILED", ErrorMsg: err.Error()}, err
-	}
-
 	if err = s.orchestrator.Transit(ctx, cmd.RunID, domain.StatusInit, domain.StatusRunning, meta); err != nil {
 		return RunResult{}, err
 	}
 
-	out, runErr := runtime.Run(ctx, port.RuntimeInput{
-		RunID:     cmd.RunID,
-		AgentID:   cmd.AgentID,
-		SessionID: cmd.SessionID,
-		UserInput: cmd.UserInput,
-		Metadata:  meta,
-	})
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if cmd.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, cmd.Timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+	s.registry.Register(cmd.RunID, cancel)
+	defer s.registry.Unregister(cmd.RunID)
+
+	var (
+		out       port.RuntimeOutput
+		runErr    error
+		hasDelta  bool
+		attempted int
+	)
+	maxAttempts := s.retryPolicy.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attempted = attempt
+		runtime, getErr := s.runtimeProvider.GetRuntime(runCtx, cmd.AgentID, cmd.SessionID)
+		if getErr != nil {
+			failMeta := mergeMeta(meta, map[string]any{
+				"error": getErr.Error(),
+			})
+			_ = s.orchestrator.Transit(ctx, cmd.RunID, domain.StatusRunning, domain.StatusFailed, failMeta)
+			return RunResult{RunID: cmd.RunID, Status: domain.StatusFailed, ErrorCode: "RUNTIME_BUILD_FAILED", ErrorMsg: getErr.Error()}, getErr
+		}
+		out, runErr = runtime.Run(runCtx, port.RuntimeInput{
+			RunID:     cmd.RunID,
+			AgentID:   cmd.AgentID,
+			SessionID: cmd.SessionID,
+			UserInput: cmd.UserInput,
+			Metadata:  meta,
+			AppendOutput: func(appendCtx context.Context, delta string) error {
+				if delta == "" {
+					return nil
+				}
+				if appendErr := s.runRepo.AppendOutput(appendCtx, cmd.RunID, delta); appendErr != nil {
+					return appendErr
+				}
+				hasDelta = true
+				s.orchestrator.EmitDelta(appendCtx, cmd.RunID, cmd.SessionID, delta, meta)
+				return nil
+			},
+		})
+		if runErr == nil {
+			break
+		}
+		status := mapRunErrorToStatus(runCtx, runErr)
+		if !s.retryPolicy.ShouldRetry(status, attempt, hasDelta) {
+			break
+		}
+		if sleepErr := s.retryPolicy.Sleep(runCtx); sleepErr != nil {
+			runErr = sleepErr
+			break
+		}
+	}
+	if attempted > 1 {
+		slog.Info("run retry attempts finished", "runID", cmd.RunID, "attempts", attempted)
+	}
 
 	if runErr != nil {
-		status := mapRunErrorToStatus(ctx, runErr)
+		status := mapRunErrorToStatus(runCtx, runErr)
 		failMeta := mergeMeta(meta, map[string]any{
 			"error":      runErr.Error(),
 			"finishedAt": s.clock.Now().Format(time.RFC3339Nano),
@@ -132,7 +198,7 @@ func (s *service) Start(ctx context.Context, cmd StartRunCommand) (RunResult, er
 		}, runErr
 	}
 
-	if out.Text != "" {
+	if out.Text != "" && !hasDelta {
 		if err = s.runRepo.AppendOutput(ctx, cmd.RunID, out.Text); err != nil {
 			failMeta := mergeMeta(meta, map[string]any{
 				"error":      fmt.Sprintf("append output failed: %v", err),
@@ -140,6 +206,12 @@ func (s *service) Start(ctx context.Context, cmd StartRunCommand) (RunResult, er
 			})
 			_ = s.orchestrator.Transit(ctx, cmd.RunID, domain.StatusRunning, domain.StatusFailed, failMeta)
 			return RunResult{RunID: cmd.RunID, Status: domain.StatusFailed, ErrorCode: "OUTPUT_APPEND_FAILED", ErrorMsg: err.Error()}, err
+		}
+	}
+	finalOutput := out.Text
+	if hasDelta && finalOutput == "" {
+		if rec, getErr := s.runRepo.Get(ctx, cmd.RunID); getErr == nil && rec != nil {
+			finalOutput = rec.Output
 		}
 	}
 
@@ -153,7 +225,7 @@ func (s *service) Start(ctx context.Context, cmd StartRunCommand) (RunResult, er
 	// Side-channel failure should not break successful run result.
 	_ = s.sseNotifier.NotifyDone(ctx, cmd.SessionID)
 
-	return RunResult{RunID: cmd.RunID, Status: domain.StatusDone, Output: out.Text}, nil
+	return RunResult{RunID: cmd.RunID, Status: domain.StatusDone, Output: finalOutput}, nil
 }
 
 func (s *service) Cancel(ctx context.Context, cmd CancelRunCommand) error {
@@ -180,7 +252,7 @@ func (s *service) Cancel(ctx context.Context, cmd CancelRunCommand) error {
 	if err = s.orchestrator.Transit(ctx, cmd.RunID, rec.Status, domain.StatusCanceled, meta); err != nil {
 		return err
 	}
-	// TODO: propagate cancellation signal to runtime execution goroutine when runtime cancellation registry is introduced.
+	_ = s.registry.Cancel(cmd.RunID)
 	return nil
 }
 
