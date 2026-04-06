@@ -141,6 +141,16 @@ func (s *factoryService) Build(ctx context.Context, cmd BuildRuntimeCommand) (Bu
 	if err != nil {
 		return BuildRuntimeResult{}, err
 	}
+	var stream assistantStreamNotifier
+	if typed, ok := any(s.sseNotifier).(assistantStreamNotifier); ok {
+		stream = typed
+	}
+	runtime = wrapRuntimeWithExecution(runtime, executionHooks{
+		messageStore: s.messageStore,
+		stream:       stream,
+		sessionID:    cmd.SessionID,
+		maxMessages:  maxMessages,
+	})
 	runtime = wrapRuntimeWithLifecycle(runtime, lifecycleHooks{
 		eventBus:    s.eventBus,
 		sseNotifier: s.sseNotifier,

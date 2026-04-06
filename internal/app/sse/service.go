@@ -85,15 +85,19 @@ func (s *Service) SendGeneratedContent(ctx context.Context, sessionID string, ch
 
 func (s *Service) StartAssistantStream(ctx context.Context, sessionID string, chatMessageID string) error {
 	begin := time.Now()
-	createdID, err := s.repo.Create(ctx, sessionID, string(chatdomain.RoleAssistant), "")
-	if err != nil {
-		s.telemetry.RecordAssistantPlaceholderCreate(ctx, sessionID, "persist_failed", false, time.Since(begin))
-		return err
+	createdID := chatMessageID
+	if createdID == "" {
+		var err error
+		createdID, err = s.repo.Create(ctx, sessionID, string(chatdomain.RoleAssistant), "")
+		if err != nil {
+			s.telemetry.RecordAssistantPlaceholderCreate(ctx, sessionID, "persist_failed", false, time.Since(begin))
+			return err
+		}
+		s.telemetry.RecordAssistantPlaceholderCreate(ctx, sessionID, "ok", true, time.Since(begin))
+	} else {
+		// Runtime may have pre-created assistant placeholder in message store.
+		s.telemetry.RecordAssistantPlaceholderCreate(ctx, sessionID, "reuse_existing", true, time.Since(begin))
 	}
-	s.telemetry.RecordAssistantPlaceholderCreate(ctx, sessionID, "ok", true, time.Since(begin))
-	// Keep current API shape for compatibility. chatMessageID argument is ignored here,
-	// and the persisted ID becomes the source of truth for START metadata.
-	// TODO: wire runtime call chain to consume this persisted ID for DELTA/END without relying on external input.
 	msg := domain.Message{
 		Type: domain.TypeAIGeneratedContentStart,
 		Payload: domain.Payload{
